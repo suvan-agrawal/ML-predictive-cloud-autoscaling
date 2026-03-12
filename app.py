@@ -1,0 +1,562 @@
+"""
+AI-Driven Cloud Auto-Scaling Dashboard
+───────────────────────────────────────
+Interactive Streamlit application with:
+  - Real-time manual scaling simulator (sliders)
+  - Configurable SLA thresholds
+  - Step-by-step dataset simulation
+  - What-If scenario testing
+  - Full historical simulation with charts
+"""
+
+import os
+import sys
+import math
+import streamlit as st
+import pandas as pd
+import numpy as np
+import matplotlib.pyplot as plt
+import matplotlib
+matplotlib.use("Agg")
+
+# ── Ensure project root is on sys.path ───────
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+if PROJECT_ROOT not in sys.path:
+    sys.path.insert(0, PROJECT_ROOT)
+
+from monitor import WorkloadMonitor
+from predictor import train_model, predict_load, load_model, MODEL_PATH
+from scaler import decide_scaling, evaluate_sla
+from resource_manager import ResourceManager
+from utils.preprocessing import get_processed_data
+
+# ──────────────────────────────────────────────
+#  Page config
+# ──────────────────────────────────────────────
+st.set_page_config(
+    page_title="AI Cloud Auto-Scaler",
+    page_icon="☁️",
+    layout="wide",
+)
+
+# ──────────────────────────────────────────────
+#  Custom CSS for better styling
+# ──────────────────────────────────────────────
+st.markdown("""
+<style>
+    .action-scale-up   { color: #FF5722; font-weight: bold; }
+    .action-scale-down { color: #4CAF50; font-weight: bold; }
+    .action-no-change  { color: #9E9E9E; }
+    div[data-testid="stMetricValue"] { font-size: 1.6rem; }
+</style>
+""", unsafe_allow_html=True)
+
+# ──────────────────────────────────────────────
+#  Sidebar — SLA Config & Model Controls
+# ──────────────────────────────────────────────
+with st.sidebar:
+    st.header("⚙️ Model Controls")
+    if st.button("Train / Retrain Model", use_container_width=True):
+        with st.spinner("Training model ..."):
+            X, y, _ = get_processed_data()
+            result = train_model(X, y)
+        st.success("Model trained!")
+        st.json({"MAE": result["mae"], "R2": result["r2"],
+                 "Train": result["train_size"], "Test": result["test_size"]})
+
+    st.divider()
+    st.header("📋 SLA Configuration")
+    st.caption("Adjust these to see how scaling behavior changes across ALL tabs.")
+
+    sla_max_cpu = st.slider(
+        "Max CPU Utilisation (%)", min_value=50, max_value=100,
+        value=80, step=5, help="Scale up if CPU exceeds this threshold"
+    )
+    sla_max_reqs = st.slider(
+        "Max Requests per Container", min_value=25, max_value=300,
+        value=100, step=25, help="Each container can handle up to this many requests"
+    )
+    sla_initial_containers = st.slider(
+        "Initial Containers", min_value=1, max_value=10,
+        value=3, step=1, help="Starting number of containers"
+    )
+
+# ──────────────────────────────────────────────
+#  Ensure a trained model exists
+# ──────────────────────────────────────────────
+if not os.path.exists(MODEL_PATH):
+    st.info("No trained model found. Training now ...")
+    X, y, _ = get_processed_data()
+    train_model(X, y)
+    st.success("Model trained automatically!")
+
+model = load_model()
+
+# ──────────────────────────────────────────────
+#  Header
+# ──────────────────────────────────────────────
+st.title("☁️ AI-Driven Cloud Auto-Scaling Dashboard")
+st.markdown(
+    "This prototype demonstrates **predictive auto-scaling** using Machine Learning. "
+    "Use the **sidebar** to adjust SLA thresholds and the **tabs** below to explore "
+    "different interactive modes."
+)
+st.divider()
+
+# ══════════════════════════════════════════════
+#  TABS — Main navigation
+# ══════════════════════════════════════════════
+tab_sim, tab_live, tab_whatif, tab_step, tab_arch = st.tabs([
+    "📈 Full Simulation",
+    "🎛️ Live Control Panel",
+    "🧪 What-If Scenarios",
+    "⏩ Step-by-Step",
+    "🏗️ Architecture",
+])
+
+# ══════════════════════════════════════════════
+#  TAB 1 — Full Historical Simulation
+# ══════════════════════════════════════════════
+with tab_sim:
+    st.subheader("Full Dataset Simulation")
+    st.caption("Runs through all 100 workload records using the current SLA settings.")
+
+    monitor = WorkloadMonitor()
+    rm = ResourceManager(initial_containers=sla_initial_containers)
+
+    timestamps, actual_reqs, pred_reqs = [], [], []
+    container_counts, cpu_vals, actions_log = [], [], []
+
+    while True:
+        metrics = monitor.get_current_metrics()
+        if metrics is None:
+            break
+
+        pred = predict_load(metrics, model)
+        decision = decide_scaling(
+            pred, metrics["cpu_usage"],
+            rm.get_current_resources()["containers"],
+            max_cpu=sla_max_cpu, max_reqs=sla_max_reqs,
+        )
+        rm.set_containers(decision["required_containers"])
+
+        timestamps.append(metrics["timestamp"])
+        actual_reqs.append(metrics["requests"])
+        pred_reqs.append(pred)
+        container_counts.append(rm.get_current_resources()["containers"])
+        cpu_vals.append(metrics["cpu_usage"])
+        actions_log.append({
+            "Timestamp": metrics["timestamp"],
+            "Actual Reqs": metrics["requests"],
+            "Predicted Reqs": pred,
+            "CPU %": metrics["cpu_usage"],
+            "Action": decision["action"],
+            "Containers": rm.get_current_resources()["containers"],
+            "Reason": decision["reason"],
+        })
+
+    # ── KPIs ──
+    st.markdown("#### Key Performance Indicators")
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Peak Actual Load", f"{max(actual_reqs)} reqs")
+    c2.metric("Peak Predicted Load", f"{max(pred_reqs)} reqs")
+    c3.metric("Max Containers", f"{max(container_counts)}")
+    scale_events = sum(1 for a in actions_log if a["Action"] != "no_change")
+    c4.metric("Scale Events", f"{scale_events}")
+
+    # ── Charts ──
+    st.markdown("---")
+    st.markdown("#### Workload vs Predicted Load")
+
+    fig1, ax1 = plt.subplots(figsize=(12, 4))
+    ax1.plot(timestamps, actual_reqs, label="Actual Requests", linewidth=2, color="#2196F3")
+    ax1.plot(timestamps, pred_reqs, label="Predicted Requests", linewidth=2, linestyle="--", color="#FF5722")
+    ax1.set_xlabel("Timestamp")
+    ax1.set_ylabel("Requests / sec")
+    ax1.legend()
+    ax1.set_title("Actual vs Predicted Workload Over Time")
+    ax1.grid(True, alpha=0.3)
+    fig1.tight_layout()
+    st.pyplot(fig1)
+
+    col_chart1, col_chart2 = st.columns(2)
+
+    with col_chart1:
+        st.markdown("#### Container Allocation")
+        fig2, ax2 = plt.subplots(figsize=(6, 3))
+        ax2.step(timestamps, container_counts, where="mid", linewidth=2, color="#4CAF50")
+        ax2.fill_between(timestamps, container_counts, step="mid", alpha=0.2, color="#4CAF50")
+        ax2.set_xlabel("Timestamp")
+        ax2.set_ylabel("Containers")
+        ax2.set_title("Allocated Containers Over Time")
+        ax2.grid(True, alpha=0.3)
+        fig2.tight_layout()
+        st.pyplot(fig2)
+
+    with col_chart2:
+        st.markdown("#### CPU Utilisation")
+        fig3, ax3 = plt.subplots(figsize=(6, 3))
+        ax3.plot(timestamps, cpu_vals, linewidth=2, color="#9C27B0")
+        ax3.axhline(y=sla_max_cpu, color="red", linestyle="--", linewidth=1,
+                     label=f"SLA Threshold ({sla_max_cpu}%)")
+        ax3.set_xlabel("Timestamp")
+        ax3.set_ylabel("CPU %")
+        ax3.set_title("CPU Usage with SLA Threshold")
+        ax3.legend()
+        ax3.grid(True, alpha=0.3)
+        fig3.tight_layout()
+        st.pyplot(fig3)
+
+    st.markdown("---")
+    st.markdown("#### Scaling Actions Log")
+    df_log = pd.DataFrame(actions_log)
+    st.dataframe(df_log, use_container_width=True, hide_index=True)
+
+# ══════════════════════════════════════════════
+#  TAB 2 — Live Control Panel
+# ══════════════════════════════════════════════
+with tab_live:
+    st.subheader("🎛️ Real-Time Scaling Simulator")
+    st.markdown(
+        "Drag the sliders to simulate **any workload scenario** and instantly see "
+        "the ML prediction, SLA evaluation, and scaling decision."
+    )
+    st.markdown("---")
+
+    # ── User input sliders ──
+    lc1, lc2, lc3 = st.columns(3)
+
+    with lc1:
+        live_timestamp = st.slider(
+            "Timestamp", min_value=1, max_value=200, value=50,
+            help="Simulated time step"
+        )
+    with lc2:
+        live_requests = st.slider(
+            "Current Requests / sec", min_value=0, max_value=800, value=250,
+            step=10, help="Incoming request rate right now"
+        )
+    with lc3:
+        live_cpu = st.slider(
+            "Current CPU Usage (%)", min_value=0.0, max_value=100.0,
+            value=65.0, step=1.0, help="Current server CPU utilisation"
+        )
+
+    live_containers = st.slider(
+        "Current Running Containers", min_value=1, max_value=15, value=3,
+        help="How many containers are currently active"
+    )
+
+    st.markdown("---")
+
+    # ── Run prediction & decision ──
+    live_metrics = {
+        "timestamp": live_timestamp,
+        "requests": live_requests,
+        "cpu_usage": live_cpu,
+    }
+    live_pred = predict_load(live_metrics, model)
+    live_sla = evaluate_sla(live_pred, live_cpu, max_cpu=sla_max_cpu, max_reqs=sla_max_reqs)
+    live_decision = decide_scaling(
+        live_pred, live_cpu, live_containers,
+        max_cpu=sla_max_cpu, max_reqs=sla_max_reqs,
+    )
+
+    # ── Display results ──
+    result_cols = st.columns(4)
+    result_cols[0].metric("ML Predicted Load", f"{live_pred} reqs",
+                          delta=f"{live_pred - live_requests:+d} from current")
+    result_cols[1].metric("Required Containers", f"{live_decision['required_containers']}",
+                          delta=f"{live_decision['required_containers'] - live_containers:+d} change")
+    result_cols[2].metric("Current Capacity", f"{live_containers * sla_max_reqs} reqs",
+                          help=f"{live_containers} containers x {sla_max_reqs} reqs each")
+
+    action_emoji = {"scale_up": "🔴 SCALE UP", "scale_down": "🟢 SCALE DOWN", "no_change": "⚪ NO CHANGE"}
+    result_cols[3].metric("Scaling Action", action_emoji.get(live_decision["action"], live_decision["action"]))
+
+    # ── Detailed breakdown ──
+    st.markdown("---")
+    detail_left, detail_right = st.columns(2)
+
+    with detail_left:
+        st.markdown("#### Decision Breakdown")
+        st.markdown(f"- **Prediction:** {live_pred} requests expected at next time step")
+        st.markdown(f"- **Containers needed:** ceil({live_pred} / {sla_max_reqs}) = "
+                    f"**{math.ceil(live_pred / sla_max_reqs)}**")
+        if live_cpu > sla_max_cpu:
+            st.warning(f"CPU {live_cpu}% exceeds SLA threshold of {sla_max_cpu}% — adding safety buffer!")
+        else:
+            st.success(f"CPU {live_cpu}% is within SLA threshold of {sla_max_cpu}%")
+        st.info(f"**Reason:** {live_decision['reason']}")
+
+    with detail_right:
+        st.markdown("#### Visual Capacity Check")
+
+        capacity = live_containers * sla_max_reqs
+        new_capacity = live_decision["required_containers"] * sla_max_reqs
+
+        fig_cap, ax_cap = plt.subplots(figsize=(5, 3))
+        bars = ax_cap.bar(
+            ["Current\nCapacity", "Predicted\nDemand", "New\nCapacity"],
+            [capacity, live_pred, new_capacity],
+            color=["#2196F3", "#FF5722", "#4CAF50"],
+            edgecolor="white", linewidth=2,
+        )
+        for bar, val in zip(bars, [capacity, live_pred, new_capacity]):
+            ax_cap.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 5,
+                        str(val), ha="center", va="bottom", fontweight="bold")
+        ax_cap.set_ylabel("Requests")
+        ax_cap.set_title("Capacity vs Demand")
+        ax_cap.grid(True, alpha=0.2, axis="y")
+        fig_cap.tight_layout()
+        st.pyplot(fig_cap)
+
+
+# ══════════════════════════════════════════════
+#  TAB 3 — What-If Scenarios
+# ══════════════════════════════════════════════
+with tab_whatif:
+    st.subheader("🧪 What-If Scenario Comparison")
+    st.markdown(
+        "Compare how the system responds to **different traffic scenarios** side by side. "
+        "Adjust each scenario's parameters independently."
+    )
+    st.markdown("---")
+
+    scenario_cols = st.columns(3)
+    scenarios = []
+
+    labels = ["Scenario A (Low Traffic)", "Scenario B (Medium Traffic)", "Scenario C (Peak Traffic)"]
+    defaults_reqs = [80, 250, 450]
+    defaults_cpu = [25.0, 60.0, 92.0]
+
+    for i, (col, label, def_req, def_cpu) in enumerate(
+        zip(scenario_cols, labels, defaults_reqs, defaults_cpu)
+    ):
+        with col:
+            st.markdown(f"**{label}**")
+            s_reqs = st.number_input(
+                "Requests/sec", min_value=0, max_value=1000,
+                value=def_req, step=10, key=f"scenario_reqs_{i}"
+            )
+            s_cpu = st.number_input(
+                "CPU Usage (%)", min_value=0.0, max_value=100.0,
+                value=def_cpu, step=5.0, key=f"scenario_cpu_{i}"
+            )
+            s_containers = st.number_input(
+                "Current Containers", min_value=1, max_value=15,
+                value=3, step=1, key=f"scenario_cont_{i}"
+            )
+            scenarios.append({
+                "label": label,
+                "requests": s_reqs,
+                "cpu": s_cpu,
+                "containers": s_containers,
+            })
+
+    st.markdown("---")
+    st.markdown("#### Comparison Results")
+
+    result_header = st.columns(4)
+    result_header[0].markdown("**Metric**")
+    for i, s in enumerate(scenarios):
+        short_label = ["A", "B", "C"][i]
+        result_header[i + 1].markdown(f"**Scenario {short_label}**")
+
+    # Compute predictions for each scenario
+    scenario_results = []
+    for s in scenarios:
+        metrics = {"timestamp": 50, "requests": s["requests"], "cpu_usage": s["cpu"]}
+        pred = predict_load(metrics, model)
+        dec = decide_scaling(pred, s["cpu"], s["containers"],
+                             max_cpu=sla_max_cpu, max_reqs=sla_max_reqs)
+        scenario_results.append({"pred": pred, "decision": dec})
+
+    # Display comparison table
+    rows = [
+        ("Predicted Load", [f"{r['pred']} reqs" for r in scenario_results]),
+        ("Required Containers", [f"{r['decision']['required_containers']}" for r in scenario_results]),
+        ("Action", [r["decision"]["action"].replace("_", " ").upper() for r in scenario_results]),
+        ("New Capacity", [f"{r['decision']['required_containers'] * sla_max_reqs} reqs" for r in scenario_results]),
+    ]
+
+    for row_label, values in rows:
+        row_cols = st.columns(4)
+        row_cols[0].write(row_label)
+        for i, v in enumerate(values):
+            row_cols[i + 1].write(v)
+
+    # ── Bar chart comparison ──
+    st.markdown("---")
+    fig_comp, ax_comp = plt.subplots(figsize=(10, 4))
+    x = np.arange(3)
+    width = 0.25
+
+    demands = [r["pred"] for r in scenario_results]
+    current_caps = [s["containers"] * sla_max_reqs for s in scenarios]
+    new_caps = [r["decision"]["required_containers"] * sla_max_reqs for r in scenario_results]
+
+    ax_comp.bar(x - width, current_caps, width, label="Current Capacity", color="#2196F3")
+    ax_comp.bar(x, demands, width, label="Predicted Demand", color="#FF5722")
+    ax_comp.bar(x + width, new_caps, width, label="Scaled Capacity", color="#4CAF50")
+    ax_comp.set_xticks(x)
+    ax_comp.set_xticklabels(["Scenario A", "Scenario B", "Scenario C"])
+    ax_comp.set_ylabel("Requests")
+    ax_comp.set_title("Capacity vs Demand — Scenario Comparison")
+    ax_comp.legend()
+    ax_comp.grid(True, alpha=0.2, axis="y")
+    fig_comp.tight_layout()
+    st.pyplot(fig_comp)
+
+
+# ══════════════════════════════════════════════
+#  TAB 4 — Step-by-Step Simulation
+# ══════════════════════════════════════════════
+with tab_step:
+    st.subheader("⏩ Step-by-Step Simulation")
+    st.markdown(
+        "Walk through the dataset **one record at a time**. Use the slider to pick "
+        "any time step and see what the system decides at that exact moment."
+    )
+    st.markdown("---")
+
+    # Load dataset for step-by-step access
+    monitor_step = WorkloadMonitor()
+    total_records = monitor_step.total_records()
+
+    step_idx = st.slider("Select Time Step", min_value=1, max_value=total_records, value=1)
+
+    # Reset and walk to the selected index
+    monitor_step.reset()
+    rm_step = ResourceManager(initial_containers=sla_initial_containers)
+
+    step_history = []
+    for i in range(step_idx):
+        m = monitor_step.get_current_metrics()
+        if m is None:
+            break
+        p = predict_load(m, model)
+        d = decide_scaling(p, m["cpu_usage"], rm_step.get_current_resources()["containers"],
+                           max_cpu=sla_max_cpu, max_reqs=sla_max_reqs)
+        rm_step.set_containers(d["required_containers"])
+        step_history.append({"metrics": m, "pred": p, "decision": d,
+                             "containers": rm_step.get_current_resources()["containers"]})
+
+    current_step = step_history[-1]
+    m = current_step["metrics"]
+    p = current_step["pred"]
+    d = current_step["decision"]
+
+    # ── Current step display ──
+    st.markdown(f"### Time Step {step_idx} of {total_records}")
+
+    sc1, sc2, sc3, sc4 = st.columns(4)
+    sc1.metric("Requests", f"{m['requests']} /sec")
+    sc2.metric("CPU Usage", f"{m['cpu_usage']}%",
+               delta="OVER SLA" if m["cpu_usage"] > sla_max_cpu else "OK",
+               delta_color="inverse" if m["cpu_usage"] > sla_max_cpu else "normal")
+    sc3.metric("Memory Usage", f"{m['memory_usage']}%")
+    sc4.metric("Predicted Next Load", f"{p} reqs")
+
+    st.markdown("---")
+
+    sc5, sc6, sc7 = st.columns(3)
+    action_display = {"scale_up": "🔴 SCALE UP", "scale_down": "🟢 SCALE DOWN", "no_change": "⚪ NO CHANGE"}
+    sc5.metric("Scaling Action", action_display.get(d["action"], d["action"]))
+    sc6.metric("Containers After", f"{d['required_containers']}")
+    sc7.metric("New Capacity", f"{d['required_containers'] * sla_max_reqs} reqs")
+
+    st.info(f"**Reason:** {d['reason']}")
+
+    # ── Step history mini chart ──
+    if len(step_history) > 1:
+        st.markdown("#### History up to this step")
+
+        step_ts = [h["metrics"]["timestamp"] for h in step_history]
+        step_actual = [h["metrics"]["requests"] for h in step_history]
+        step_preds = [h["pred"] for h in step_history]
+        step_conts = [h["containers"] for h in step_history]
+
+        fig_step, (ax_s1, ax_s2) = plt.subplots(1, 2, figsize=(12, 3))
+
+        ax_s1.plot(step_ts, step_actual, label="Actual", linewidth=2, color="#2196F3")
+        ax_s1.plot(step_ts, step_preds, label="Predicted", linewidth=2,
+                   linestyle="--", color="#FF5722")
+        ax_s1.axvline(x=step_idx, color="gray", linestyle=":", alpha=0.5, label="Current step")
+        ax_s1.set_xlabel("Timestamp")
+        ax_s1.set_ylabel("Requests")
+        ax_s1.set_title("Workload History")
+        ax_s1.legend(fontsize=8)
+        ax_s1.grid(True, alpha=0.3)
+
+        ax_s2.step(step_ts, step_conts, where="mid", linewidth=2, color="#4CAF50")
+        ax_s2.fill_between(step_ts, step_conts, step="mid", alpha=0.2, color="#4CAF50")
+        ax_s2.axvline(x=step_idx, color="gray", linestyle=":", alpha=0.5, label="Current step")
+        ax_s2.set_xlabel("Timestamp")
+        ax_s2.set_ylabel("Containers")
+        ax_s2.set_title("Container History")
+        ax_s2.legend(fontsize=8)
+        ax_s2.grid(True, alpha=0.3)
+
+        fig_step.tight_layout()
+        st.pyplot(fig_step)
+
+
+# ══════════════════════════════════════════════
+#  TAB 5 — Architecture
+# ══════════════════════════════════════════════
+with tab_arch:
+    st.subheader("System Architecture")
+    st.markdown("""
+    ```
+    Client Requests
+         |
+         v
+    Monitoring Module  -->  Metrics Collector
+         |
+         v
+    Data Preprocessing
+         |
+         v
+    ML Prediction Engine  -->  Predicted Workload
+         |
+         v
+    SLA Evaluation Engine
+         |
+         v
+    Scaling Decision Module
+         |
+         v
+    Resource Manager  -->  Allocated Containers
+         |
+         +------------ feedback loop -----> Monitoring
+    ```
+    """)
+
+    st.markdown("---")
+    st.markdown("#### Module Map")
+
+    module_data = {
+        "Module": ["Monitoring", "Preprocessing", "ML Prediction", "SLA + Scaling",
+                    "Resource Manager", "Dashboard"],
+        "File": ["monitor.py", "utils/preprocessing.py", "predictor.py",
+                 "scaler.py", "resource_manager.py", "app.py"],
+        "Key Functions": [
+            "get_current_metrics()",
+            "load_dataset(), prepare_features()",
+            "train_model(), predict_load()",
+            "evaluate_sla(), decide_scaling()",
+            "scale_up(), scale_down(), set_containers()",
+            "Streamlit UI (this dashboard)",
+        ],
+    }
+    st.table(pd.DataFrame(module_data))
+
+    st.markdown("---")
+    st.markdown("#### Current SLA Configuration")
+    st.markdown(f"- **Max CPU Utilisation:** {sla_max_cpu}%")
+    st.markdown(f"- **Max Requests per Container:** {sla_max_reqs}")
+    st.markdown(f"- **Initial Containers:** {sla_initial_containers}")
+
+st.divider()
+st.caption("AI-Driven Cloud Auto-Scaling Prototype  |  Built with Streamlit & Scikit-learn")
