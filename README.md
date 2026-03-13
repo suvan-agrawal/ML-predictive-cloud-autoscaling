@@ -277,33 +277,43 @@ If CPU is already above 80%, one extra container is added as a safety buffer.
 
 **Purpose:** Ties everything together in an interactive Streamlit web application.
 
-See [Dashboard Features](#dashboard-features) section below for details.
-
----
-
-## Dataset Design
+See [Dashboard Features](#dashboard-features) section below for details.## Dataset Design
 
 **File:** `dataset/workload_dataset.csv`
 
+**Size:** 360 records (15 days × 24 hours)
+
 | Column | Type | Description |
 |--------|------|-------------|
-| `timestamp` | int | Sequential time step (1 to 100) |
-| `requests` | int | Incoming requests per second at this time |
+| `datetime` | string | Real timestamp (e.g., "2026-02-01 14:00") |
+| `hour` | int | Hour of day (0-23) |
+| `day_of_week` | int | Day of week (0=Sunday, 6=Saturday) |
+| `is_weekend` | int | Binary flag (1=weekend, 0=weekday) |
+| `requests` | int | Incoming requests per hour |
 | `cpu_usage` | float | Server CPU utilisation percentage |
 | `memory_usage` | float | Server memory utilisation percentage |
 
-**Traffic pattern (100 records):**
+**Traffic patterns (realistic daily and weekly cycles):**
 
 ```
-Phase 1: Gradual ramp-up      (timestamp 1-44)   → 100 to 400 reqs
-Phase 2: Peak traffic          (timestamp 44-46)  → 400 reqs sustained
-Phase 3: Cooldown/decline      (timestamp 47-58)  → 400 down to 170 reqs
-Phase 4: Second wave ramp-up   (timestamp 59-72)  → 170 back up to 420 reqs
-Phase 5: Second cooldown       (timestamp 73-88)  → 420 down to 150 reqs
-Phase 6: Recovery              (timestamp 89-100)  → 150 back up to 360 reqs
+Hourly Pattern:
+  00:00 - 05:00  →  Low traffic (60-85 reqs)     — Night lull
+  06:00 - 09:00  →  Morning ramp (100-250 reqs)   — Users waking up
+  10:00 - 13:00  →  Peak hours (300-420 reqs)      — Business hours
+  14:00 - 17:00  →  Afternoon (325-400 reqs)       — Still busy
+  18:00 - 21:00  →  Evening decline (160-280 reqs) — Winding down
+  22:00 - 23:00  →  Late night (110-140 reqs)      — Approaching night
+
+Weekly Pattern:
+  Weekdays (Mon-Fri) → Full traffic
+  Weekends (Sat-Sun) → 30% reduction in traffic
+
+Growth Trend:
+  Day 1 → baseline
+  Day 15 → ~21% higher (gradual daily growth)
 ```
 
-This realistic pattern tests the system's ability to handle **gradual growth, sudden peaks, cooldowns, and unexpected second waves**.
+This pattern enables the model to learn **when** traffic is high (not just *how much*), making predictions time-aware.
 
 ---
 
@@ -312,40 +322,51 @@ This realistic pattern tests the system's ability to handle **gradual growth, su
 ### Model Type
 **Linear Regression** (from scikit-learn)
 
+### Features — Time-Aware
+
+| Feature | Type | Why it matters |
+|---------|------|---------------|
+| `hour` | Time | Captures daily traffic cycle (peaks at 10-14, dips at 0-5) |
+| `day_of_week` | Time | Captures weekly patterns |
+| `is_weekend` | Time | Weekend traffic is ~30% lower than weekday |
+| `requests` | Workload | Current request rate (strongest predictor) |
+| `cpu_usage` | Workload | Current CPU utilisation |
+
 ### Training Details
 
 | Parameter | Value |
 |-----------|-------|
 | Algorithm | `LinearRegression` |
 | Train/Test Split | 80% / 20% (random_state=42) |
-| Features | timestamp, requests, cpu_usage |
-| Target | Next time-step's request count |
-| Training Samples | 79 |
-| Test Samples | 20 |
+| Features | hour, day_of_week, is_weekend, requests, cpu_usage |
+| Target | Next hour's request count |
+| Training Samples | 287 |
+| Test Samples | 72 |
 
 ### Performance Metrics
 
 | Metric | Value | Meaning |
 |--------|-------|---------|
-| **R-squared (R2)** | **0.9717** | Model explains 97.17% of variance in actual data |
-| **MAE** | **12.71** | On average, predictions are off by ~13 requests |
+| **R-squared (R²)** | **0.90** | Model explains 90% of variance in actual data |
+| **MAE** | **29.52** | On average, predictions are off by ~30 requests |
 
-An R2 of 0.97 indicates the model is **highly accurate** for this workload pattern.
+R² = 0.90 is strong for a dataset with daily cycles and random noise. The model correctly captures the hourly and weekly traffic patterns.
 
 ### How Prediction Works
 
 ```
-Input:  current metrics  {timestamp: 66, requests: 330, cpu_usage: 85.0}
-                              |
-                              v
-                     Linear Regression Model
-                              |
-                              v
-Output: predicted_requests = 348
+Input:  current metrics  {hour: 12, day_of_week: 3, is_weekend: 0,
+                          requests: 400, cpu_usage: 85.0}
+                               |
+                               v
+                      Linear Regression Model
+                               |
+                               v
+Output: predicted_requests = 395
 ```
 
-The model learns the relationship:
-> "Given the current timestamp, current request count, and current CPU usage, what will the request count be in the next time step?"
+The model learns:
+> "Given the current hour of day, day of week, whether it's a weekend, current request count, and CPU usage — what will the request count be in the next hour?"
 
 ---
 

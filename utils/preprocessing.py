@@ -4,6 +4,9 @@ Data Preprocessing Module
 Loads the workload dataset, cleans missing values,
 normalises numeric columns, and prepares feature / target
 arrays for the ML prediction engine.
+
+Features now include time-of-day and day-of-week signals
+so the model can learn hourly and weekly traffic patterns.
 """
 
 import os
@@ -20,7 +23,7 @@ DATASET_PATH = os.path.join(
     "workload_dataset.csv",
 )
 
-FEATURE_COLUMNS = ["timestamp", "requests", "cpu_usage"]
+FEATURE_COLUMNS = ["hour", "day_of_week", "is_weekend", "requests", "cpu_usage"]
 TARGET_COLUMN = "requests"
 
 
@@ -30,6 +33,9 @@ TARGET_COLUMN = "requests"
 def load_dataset(path: str = DATASET_PATH) -> pd.DataFrame:
     """Load the CSV workload dataset and return a DataFrame."""
     df = pd.read_csv(path)
+    # Ensure datetime column is parsed
+    if "datetime" in df.columns:
+        df["datetime"] = pd.to_datetime(df["datetime"])
     return df
 
 
@@ -62,14 +68,14 @@ def prepare_features(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
     """
     Build feature matrix X and target vector y for the ML model.
 
-    Features : previous-row values of [timestamp, requests, cpu_usage]
+    Features : [hour, day_of_week, is_weekend, requests, cpu_usage]
     Target   : next-row value of requests  (i.e. shift(-1))
 
     The last row is dropped because it has no "next" target.
     """
     df = df.copy()
     df["target"] = df[TARGET_COLUMN].shift(-1)
-    df = df.dropna()
+    df = df.dropna(subset=["target"])
 
     X = df[FEATURE_COLUMNS].values
     y = df["target"].values
@@ -79,7 +85,7 @@ def prepare_features(df: pd.DataFrame) -> tuple[np.ndarray, np.ndarray]:
 def get_processed_data(path: str = DATASET_PATH):
     """
     One-call convenience function:
-    load → clean → prepare features.
+    load -> clean -> prepare features.
 
     Returns
     -------

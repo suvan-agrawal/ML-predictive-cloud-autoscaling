@@ -4,6 +4,8 @@ Monitoring Module
 Simulates real-time monitoring of cloud workload metrics.
 Loads recorded metrics from the dataset and serves them
 sequentially, mimicking a live monitoring feed.
+
+Now returns datetime strings and time-of-day features.
 """
 
 import os
@@ -24,6 +26,8 @@ class WorkloadMonitor:
 
     def __init__(self, dataset_path: str = DATASET_PATH):
         self.data = pd.read_csv(dataset_path)
+        if "datetime" in self.data.columns:
+            self.data["datetime"] = pd.to_datetime(self.data["datetime"])
         self._index = 0
 
     # ── public API ────────────────────────────
@@ -33,7 +37,8 @@ class WorkloadMonitor:
 
         Returns
         -------
-        dict  –  {"timestamp": int, "requests": int,
+        dict  –  {"datetime": str, "hour": int, "day_of_week": int,
+                   "is_weekend": int, "requests": int,
                    "cpu_usage": float, "memory_usage": float}
         None  –  when all records have been consumed.
         """
@@ -44,7 +49,10 @@ class WorkloadMonitor:
         self._index += 1
 
         return {
-            "timestamp": int(row["timestamp"]),
+            "datetime": str(row["datetime"]),
+            "hour": int(row["hour"]),
+            "day_of_week": int(row["day_of_week"]),
+            "is_weekend": int(row["is_weekend"]),
             "requests": int(row["requests"]),
             "cpu_usage": float(row["cpu_usage"]),
             "memory_usage": float(row["memory_usage"]),

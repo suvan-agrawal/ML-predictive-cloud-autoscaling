@@ -57,7 +57,8 @@ Let me explain each step with a concrete example:
 
 **What it does:** Reads the current workload metrics from the dataset.
 
-Think of it like a health monitor on a server. Every second, it checks:
+Think of it like a health monitor on a server. Every hour, it checks:
+- What time is it? (hour, day of week)
 - How many requests are coming in?
 - How much CPU is being used?
 - How much memory is being used?
@@ -65,14 +66,17 @@ Think of it like a health monitor on a server. Every second, it checks:
 **Example output:**
 ```
 {
-    "timestamp": 30,
-    "requests": 300,        ← 300 requests per second right now
-    "cpu_usage": 80.0,      ← CPU is at 80%
-    "memory_usage": 90.0    ← Memory at 90%
+    "datetime": "2026-02-05 14:00",
+    "hour": 14,                ← 2 PM
+    "day_of_week": 4,          ← Thursday
+    "is_weekend": 0,           ← Weekday
+    "requests": 380,           ← 380 requests per hour right now
+    "cpu_usage": 80.0,         ← CPU is at 80%
+    "memory_usage": 82.0       ← Memory at 82%
 }
 ```
 
-In our project, we don't have a real server. So `monitor.py` reads from the CSV file row by row, pretending each row is a "new second" of data.
+In our project, we don't have a real server. So `monitor.py` reads from the CSV file row by row, pretending each row is a "new hour" of data.
 
 ---
 
@@ -82,19 +86,19 @@ In our project, we don't have a real server. So `monitor.py` reads from the CSV 
 
 The ML model can't directly understand raw data. We need to:
 1. Fill in any missing values
-2. Extract the right columns (timestamp, requests, cpu_usage)
+2. Extract time-aware features: `hour`, `day_of_week`, `is_weekend`, `requests`, `cpu_usage`
 3. Create the "target" — what we want to predict
 
 **The key trick — how we create training data:**
 
 ```
-Row 1:  timestamp=1,  requests=100,  cpu=30   →  Target: 110 (next row's requests)
-Row 2:  timestamp=2,  requests=110,  cpu=32   →  Target: 120 (next row's requests)
-Row 3:  timestamp=3,  requests=120,  cpu=35   →  Target: 115 (next row's requests)
+Row 1:  hour=0,  dow=0, wknd=1, reqs=42,  cpu=12  →  Target: 44 (next row's requests)
+Row 2:  hour=1,  dow=0, wknd=1, reqs=44,  cpu=13  →  Target: 46 (next row's requests)
+Row 3:  hour=2,  dow=0, wknd=1, reqs=46,  cpu=14  →  Target: 50 (next row's requests)
 ...
 ```
 
-We shift the data by one row. The model learns: "Given current values → predict the NEXT request count."
+We shift the data by one row. The model learns: "Given the current hour, day, and workload → predict the NEXT hour's request count."
 
 ---
 
@@ -106,19 +110,18 @@ We shift the data by one row. The model learns: "Given current values → predic
 
 The model learns a formula like:
 ```
-predicted_requests = (a × timestamp) + (b × current_requests) + (c × cpu_usage) + d
+predicted_requests = (a × hour) + (b × day_of_week) + (c × is_weekend) + (d × current_requests) + (e × cpu_usage) + f
 ```
 
-During training, scikit-learn finds the best values for a, b, c, d that minimize prediction errors.
+During training, scikit-learn finds the best values for a, b, c, d, e, f that minimize prediction errors.
 
 **Example:**
 ```
-Input:   timestamp=30, requests=300, cpu=80
-Model:   predicted_requests = (0.1 × 30) + (0.95 × 300) + (0.2 × 80) + 5
-Output:  predicted_requests ≈ 307
+Input:   hour=12, day_of_week=3, is_weekend=0, requests=400, cpu=85
+Output:  predicted_requests ≈ 395
 ```
 
-The model is 97% accurate (R² = 0.9717), meaning its predictions are very close to the actual values.
+The model is 90% accurate (R² = 0.90), meaning its predictions closely track the actual values even with daily cycles and noise.
 
 ---
 
@@ -196,13 +199,13 @@ The sidebar has **3 sliders** that control the SLA rules:
 
 ### Tab 1: Full Simulation
 
-**What happens:** The system runs through all 100 dataset records automatically using the current SLA settings.
+**What happens:** The system runs through all 360 hourly records (15 days) automatically using the current SLA settings.
 
 **Connection to modules:**
 ```
-For each of the 100 rows:
-    monitor.py       → reads the row
-    predictor.py     → predicts next request count
+For each of the 360 rows:
+    monitor.py       → reads the row (datetime, hour, day, requests, cpu)
+    predictor.py     → predicts next hour's request count
     scaler.py        → decides scaling action
     resource_manager → adjusts containers
     
@@ -212,8 +215,9 @@ Results → displayed as KPI cards, charts, and a log table
 **What to look at:**
 - KPI cards show summary stats
 - Blue line = actual traffic, Orange line = ML prediction (they should track closely)
-- Green step chart = how containers change over time
+- Green step chart = how containers change over time (shows daily cycles!)
 - Purple line = CPU usage, Red dashed line = SLA threshold
+- Orange bar chart = Average Traffic by Hour of Day (shows the daily pattern)
 
 ---
 
@@ -260,30 +264,31 @@ This lets you compare: "What would happen with low traffic vs medium vs peak?"
 
 ```
 YOU SET (Live Control Panel):
-    Timestamp:          50
-    Current Requests:   150 reqs/sec
-    Current CPU:        45%
+    Hour of Day:        3 (3 AM — night)
+    Day of Week:        Tuesday (weekday)
+    Current Requests:   65 reqs/hour
+    Current CPU:        15%
     Current Containers: 3
 
 WHAT HAPPENS:
 
-Step 1 → ML Model receives: {timestamp:50, requests:150, cpu:45}
-Step 2 → ML Model predicts:  ~157 requests in next time step
+Step 1 → ML Model receives: {hour:3, dow:2, wknd:0, requests:65, cpu:15}
+Step 2 → ML Model predicts:  ~70 requests in next hour
 Step 3 → SLA Check:
-         - CPU 45% < 80% threshold?     YES, safe ✓
-         - Containers needed: ceil(157/100) = 2
+         - CPU 15% < 80% threshold?     YES, safe ✓
+         - Containers needed: ceil(70/100) = 1
 Step 4 → Decision:
-         - Required: 2 containers
+         - Required: 1 container
          - Currently: 3 containers
-         - 2 < 3 → SCALE DOWN
-Step 5 → Result: Remove 1 container (3 → 2)
-         New capacity: 2 × 100 = 200 reqs (enough for 157)
+         - 1 < 3 → SCALE DOWN
+Step 5 → Result: Remove 2 containers (3 → 1)
+         New capacity: 1 × 100 = 100 reqs (enough for 70)
 
 DISPLAY:
-    ML Predicted Load:     157 reqs (+7 from current)
-    Required Containers:   2 (-1 change)
+    ML Predicted Load:     70 reqs (+5 from current)
+    Required Containers:   1 (-2 change)
     Scaling Action:        🟢 SCALE DOWN
-    Reason:                "Predicted 157 reqs → only 2 containers needed (currently 3)"
+    Reason:                "Predicted 70 reqs → only 1 container needed (currently 3)"
 ```
 
 ---
@@ -292,28 +297,30 @@ DISPLAY:
 
 ```
 YOU SET:
-    Timestamp:          70
-    Current Requests:   400 reqs/sec
-    Current CPU:        65%
+    Hour of Day:        12 (noon — peak)
+    Day of Week:        Wednesday (weekday)
+    Current Requests:   400 reqs/hour
+    Current CPU:        85%
     Current Containers: 3
 
 WHAT HAPPENS:
 
-Step 1 → ML Model receives: {timestamp:70, requests:400, cpu:65}
-Step 2 → ML Model predicts:  ~410 requests
+Step 1 → ML Model receives: {hour:12, dow:3, wknd:0, requests:400, cpu:85}
+Step 2 → ML Model predicts:  ~395 requests
 Step 3 → SLA Check:
-         - CPU 65% < 80%?     YES, safe ✓
-         - Containers needed: ceil(410/100) = 5
-Step 4 → Decision:
-         - Required: 5 containers
+         - CPU 85% > 80%?     ⚠️ VIOLATION!
+         - Containers needed: ceil(395/100) = 4
+Step 4 → Safety buffer activates → max(4, current+1) = max(4, 4) = 4
+Step 5 → Decision:
+         - Required: 4 containers
          - Currently: 3 containers
-         - 5 > 3 → SCALE UP
-Step 5 → Result: Add 2 containers (3 → 5)
-         New capacity: 5 × 100 = 500 reqs (enough for 410)
+         - 4 > 3 → SCALE UP
+Step 6 → Result: Add 1 container (3 → 4)
+         New capacity: 4 × 100 = 400 reqs (enough for 395)
 
 DISPLAY:
-    ML Predicted Load:     410 reqs (+10 from current)
-    Required Containers:   5 (+2 change)
+    ML Predicted Load:     395 reqs (-5 from current)
+    Required Containers:   4 (+1 change)
     Scaling Action:        🔴 SCALE UP
 ```
 
@@ -323,30 +330,29 @@ DISPLAY:
 
 ```
 YOU SET:
-    Timestamp:          70
-    Current Requests:   350 reqs/sec
-    Current CPU:        92%          ← ABOVE 80% THRESHOLD!
+    Hour of Day:        12 (noon)
+    Day of Week:        Saturday (weekend!)
+    Current Requests:   280 reqs/hour     ← lower because weekend
+    Current CPU:        60%
     Current Containers: 3
 
 WHAT HAPPENS:
 
-Step 1 → ML Model receives: {timestamp:70, requests:350, cpu:92}
-Step 2 → ML Model predicts:  ~365 requests
+Step 1 → ML Model receives: {hour:12, dow:6, wknd:1, requests:280, cpu:60}
+Step 2 → ML Model predicts:  ~270 requests (weekend → model predicts lower)
 Step 3 → SLA Check:
-         - CPU 92% > 80%?     ⚠️ VIOLATION!
-         - Containers needed: ceil(365/100) = 4
-Step 4 → Safety buffer activates:
-         - Normal calculation: 4 containers
-         - But CPU is over threshold → required = max(4, current+1) = max(4, 4) = 4
-Step 5 → Decision:
-         - Required: 4 containers
+         - CPU 60% < 80%?     YES, safe ✓
+         - Containers needed: ceil(270/100) = 3
+Step 4 → Decision:
+         - Required: 3 containers
          - Currently: 3
-         - 4 > 3 → SCALE UP
-Step 6 → Result: Add 1 container (3 → 4)
+         - 3 == 3 → NO CHANGE
+Step 5 → Result: Keep 3 containers
 
 DISPLAY:
-    ⚠️ WARNING: "CPU 92.0% exceeds SLA threshold of 80%"
-    Scaling Action: 🔴 SCALE UP
+    ML Predicted Load:     270 reqs (-10 from current)
+    Scaling Action:        ⚪ NO CHANGE
+    Note: Weekend traffic is lower, so fewer containers needed
 ```
 
 ---
@@ -384,20 +390,20 @@ Action: SCALE DOWN 🟢  (3 → 2)
 ### Dry Run 5: Step-by-Step Progression
 
 ```
-STEP 1:   requests=100, cpu=30  → predict=110  → need 2 → have 3 → SCALE DOWN to 2
-STEP 5:   requests=130, cpu=37  → predict=140  → need 2 → have 2 → NO CHANGE
-STEP 15:  requests=200, cpu=55  → predict=210  → need 3 → have 2 → SCALE UP to 3
-STEP 30:  requests=300, cpu=80  → predict=310  → need 4 → have 3 → SCALE UP to 4
-STEP 44:  requests=400, cpu=95  → predict=395  → need 4 → cpu>80 → SCALE UP to 5
-STEP 55:  requests=200, cpu=60  → predict=190  → need 2 → have 5 → SCALE DOWN to 2
-STEP 70:  requests=400, cpu=95  → predict=410  → need 5 → have 2 → SCALE UP to 5
-STEP 88:  requests=150, cpu=50  → predict=160  → need 2 → have 5 → SCALE DOWN to 2
+Feb 01 03:00 (Sun)  reqs=50,  cpu=12  → predict=55   → need 1 → have 3 → SCALE DOWN to 1
+Feb 01 09:00 (Sun)  reqs=145, cpu=32  → predict=150  → need 2 → have 1 → SCALE UP to 2
+Feb 02 12:00 (Mon)  reqs=380, cpu=78  → predict=370  → need 4 → have 2 → SCALE UP to 4
+Feb 02 22:00 (Mon)  reqs=120, cpu=28  → predict=65   → need 1 → have 4 → SCALE DOWN to 1
+Feb 07 11:00 (Sat)  reqs=260, cpu=55  → predict=270  → need 3 → have 1 → SCALE UP to 3
+Feb 10 13:00 (Tue)  reqs=440, cpu=90  → predict=420  → need 5 → cpu>80 → SCALE UP to 5
+Feb 15 03:00 (Sun)  reqs=55,  cpu=15  → predict=60   → need 1 → have 5 → SCALE DOWN to 1
 ```
 
-Notice the pattern:
-- Traffic rises → containers scale UP
-- Traffic drops → containers scale DOWN
-- CPU above 80% → extra safety container added
+Notice the patterns:
+- **Daily cycle:** containers scale UP during business hours, DOWN at night
+- **Weekend dip:** weekend peaks are lower than weekday peaks
+- **CPU above 80%** → extra safety container added
+- **Day-over-day growth** → later days need slightly more containers
 
 ---
 
@@ -408,11 +414,12 @@ dataset/workload_dataset.csv
         |
         |  (read by)
         v
-    monitor.py ─── get_current_metrics() ──→ {timestamp, requests, cpu, memory}
+    monitor.py ─── get_current_metrics() ──→ {datetime, hour, dow, wknd, requests, cpu, mem}
         |
         |  (fed to)
         v
     predictor.py ─── predict_load() ──→ predicted_requests (integer)
+        |             Uses 5 features: hour, day_of_week, is_weekend, requests, cpu_usage
         |
         |  (checked by)
         v
@@ -426,8 +433,8 @@ dataset/workload_dataset.csv
         |  (displayed by)
         v
     app.py ─── Streamlit Dashboard
-        |       Tab 1: Full auto-run of all 100 rows
-        |       Tab 2: YOU control the inputs with sliders
+        |       Tab 1: Full auto-run of all 360 hourly rows
+        |       Tab 2: YOU control hour, day, requests, CPU with sliders
         |       Tab 3: Compare 3 scenarios side by side
         |       Tab 4: Walk through data one row at a time
         |       Tab 5: View architecture
@@ -445,9 +452,10 @@ dataset/workload_dataset.csv
 | Question | Answer |
 |----------|--------|
 | What model does it use? | Linear Regression (scikit-learn) |
-| What does it predict? | Next time-step's request count |
-| How accurate is it? | R² = 0.9717 (97% accuracy) |
-| What features go into the model? | timestamp, current requests, current CPU |
+| What does it predict? | Next hour's request count |
+| How accurate is it? | R² = 0.90 (90% accuracy) |
+| How many data points? | 360 records (15 days × 24 hours) |
+| What features go into the model? | hour, day_of_week, is_weekend, requests, cpu_usage |
 | What is the scaling formula? | `containers = ceil(predicted_requests / max_reqs_per_container)` |
 | When does scale UP happen? | When predicted load needs more containers than currently running |
 | When does scale DOWN happen? | When predicted load needs fewer containers |

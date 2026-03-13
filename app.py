@@ -7,6 +7,9 @@ Interactive Streamlit application with:
   - Step-by-step dataset simulation
   - What-If scenario testing
   - Full historical simulation with charts
+
+Updated: uses datetime timestamps and time-aware ML features
+(hour, day_of_week, is_weekend).
 """
 
 import os
@@ -16,6 +19,7 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
 import matplotlib
 matplotlib.use("Agg")
 
@@ -40,13 +44,10 @@ st.set_page_config(
 )
 
 # ──────────────────────────────────────────────
-#  Custom CSS for better styling
+#  Custom CSS
 # ──────────────────────────────────────────────
 st.markdown("""
 <style>
-    .action-scale-up   { color: #FF5722; font-weight: bold; }
-    .action-scale-down { color: #4CAF50; font-weight: bold; }
-    .action-no-change  { color: #9E9E9E; }
     div[data-testid="stMetricValue"] { font-size: 1.6rem; }
 </style>
 """, unsafe_allow_html=True)
@@ -55,7 +56,7 @@ st.markdown("""
 #  Sidebar — SLA Config & Model Controls
 # ──────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Model Controls")
+    st.header("Model Controls")
     if st.button("Train / Retrain Model", use_container_width=True):
         with st.spinner("Training model ..."):
             X, y, _ = get_processed_data()
@@ -65,7 +66,7 @@ with st.sidebar:
                  "Train": result["train_size"], "Test": result["test_size"]})
 
     st.divider()
-    st.header("📋 SLA Configuration")
+    st.header("SLA Configuration")
     st.caption("Adjust these to see how scaling behavior changes across ALL tabs.")
 
     sla_max_cpu = st.slider(
@@ -95,11 +96,12 @@ model = load_model()
 # ──────────────────────────────────────────────
 #  Header
 # ──────────────────────────────────────────────
-st.title("☁️ AI-Driven Cloud Auto-Scaling Dashboard")
+st.title("AI-Driven Cloud Auto-Scaling Dashboard")
 st.markdown(
     "This prototype demonstrates **predictive auto-scaling** using Machine Learning. "
-    "Use the **sidebar** to adjust SLA thresholds and the **tabs** below to explore "
-    "different interactive modes."
+    "The dataset covers **15 days of hourly data** with realistic traffic patterns "
+    "(business-hour peaks, night lulls, weekend dips). Use the **sidebar** to adjust "
+    "SLA thresholds and the **tabs** below to explore different interactive modes."
 )
 st.divider()
 
@@ -107,24 +109,24 @@ st.divider()
 #  TABS — Main navigation
 # ══════════════════════════════════════════════
 tab_sim, tab_live, tab_whatif, tab_step, tab_arch = st.tabs([
-    "📈 Full Simulation",
-    "🎛️ Live Control Panel",
-    "🧪 What-If Scenarios",
-    "⏩ Step-by-Step",
-    "🏗️ Architecture",
+    "Full Simulation",
+    "Live Control Panel",
+    "What-If Scenarios",
+    "Step-by-Step",
+    "Architecture",
 ])
 
 # ══════════════════════════════════════════════
 #  TAB 1 — Full Historical Simulation
 # ══════════════════════════════════════════════
 with tab_sim:
-    st.subheader("Full Dataset Simulation")
-    st.caption("Runs through all 100 workload records using the current SLA settings.")
+    st.subheader("Full Dataset Simulation (15 Days)")
+    st.caption("Runs through all 360 hourly records using the current SLA settings.")
 
     monitor = WorkloadMonitor()
     rm = ResourceManager(initial_containers=sla_initial_containers)
 
-    timestamps, actual_reqs, pred_reqs = [], [], []
+    datetimes, actual_reqs, pred_reqs = [], [], []
     container_counts, cpu_vals, actions_log = [], [], []
 
     while True:
@@ -140,15 +142,17 @@ with tab_sim:
         )
         rm.set_containers(decision["required_containers"])
 
-        timestamps.append(metrics["timestamp"])
+        datetimes.append(pd.Timestamp(metrics["datetime"]))
         actual_reqs.append(metrics["requests"])
         pred_reqs.append(pred)
         container_counts.append(rm.get_current_resources()["containers"])
         cpu_vals.append(metrics["cpu_usage"])
         actions_log.append({
-            "Timestamp": metrics["timestamp"],
+            "Datetime": metrics["datetime"],
+            "Hour": metrics["hour"],
+            "Day": ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][metrics["day_of_week"]],
             "Actual Reqs": metrics["requests"],
-            "Predicted Reqs": pred,
+            "Predicted": pred,
             "CPU %": metrics["cpu_usage"],
             "Action": decision["action"],
             "Containers": rm.get_current_resources()["containers"],
@@ -166,15 +170,18 @@ with tab_sim:
 
     # ── Charts ──
     st.markdown("---")
-    st.markdown("#### Workload vs Predicted Load")
+    st.markdown("#### Workload vs Predicted Load (15 Days)")
 
-    fig1, ax1 = plt.subplots(figsize=(12, 4))
-    ax1.plot(timestamps, actual_reqs, label="Actual Requests", linewidth=2, color="#2196F3")
-    ax1.plot(timestamps, pred_reqs, label="Predicted Requests", linewidth=2, linestyle="--", color="#FF5722")
-    ax1.set_xlabel("Timestamp")
-    ax1.set_ylabel("Requests / sec")
+    fig1, ax1 = plt.subplots(figsize=(14, 4))
+    ax1.plot(datetimes, actual_reqs, label="Actual Requests", linewidth=1.5, color="#2196F3")
+    ax1.plot(datetimes, pred_reqs, label="Predicted Requests", linewidth=1.5, linestyle="--", color="#FF5722")
+    ax1.set_xlabel("Date & Time")
+    ax1.set_ylabel("Requests / hour")
     ax1.legend()
-    ax1.set_title("Actual vs Predicted Workload Over Time")
+    ax1.set_title("Actual vs Predicted Workload Over 15 Days")
+    ax1.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+    ax1.xaxis.set_major_locator(mdates.DayLocator())
+    plt.xticks(rotation=45)
     ax1.grid(True, alpha=0.3)
     fig1.tight_layout()
     st.pyplot(fig1)
@@ -183,29 +190,53 @@ with tab_sim:
 
     with col_chart1:
         st.markdown("#### Container Allocation")
-        fig2, ax2 = plt.subplots(figsize=(6, 3))
-        ax2.step(timestamps, container_counts, where="mid", linewidth=2, color="#4CAF50")
-        ax2.fill_between(timestamps, container_counts, step="mid", alpha=0.2, color="#4CAF50")
-        ax2.set_xlabel("Timestamp")
+        fig2, ax2 = plt.subplots(figsize=(7, 3))
+        ax2.step(datetimes, container_counts, where="mid", linewidth=1.5, color="#4CAF50")
+        ax2.fill_between(datetimes, container_counts, step="mid", alpha=0.2, color="#4CAF50")
+        ax2.set_xlabel("Date & Time")
         ax2.set_ylabel("Containers")
         ax2.set_title("Allocated Containers Over Time")
+        ax2.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+        ax2.xaxis.set_major_locator(mdates.DayLocator(interval=2))
+        plt.xticks(rotation=45)
         ax2.grid(True, alpha=0.3)
         fig2.tight_layout()
         st.pyplot(fig2)
 
     with col_chart2:
         st.markdown("#### CPU Utilisation")
-        fig3, ax3 = plt.subplots(figsize=(6, 3))
-        ax3.plot(timestamps, cpu_vals, linewidth=2, color="#9C27B0")
+        fig3, ax3 = plt.subplots(figsize=(7, 3))
+        ax3.plot(datetimes, cpu_vals, linewidth=1.5, color="#9C27B0")
         ax3.axhline(y=sla_max_cpu, color="red", linestyle="--", linewidth=1,
                      label=f"SLA Threshold ({sla_max_cpu}%)")
-        ax3.set_xlabel("Timestamp")
+        ax3.set_xlabel("Date & Time")
         ax3.set_ylabel("CPU %")
         ax3.set_title("CPU Usage with SLA Threshold")
         ax3.legend()
+        ax3.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
+        ax3.xaxis.set_major_locator(mdates.DayLocator(interval=2))
+        plt.xticks(rotation=45)
         ax3.grid(True, alpha=0.3)
         fig3.tight_layout()
         st.pyplot(fig3)
+
+    # ── Hourly pattern chart ──
+    st.markdown("---")
+    st.markdown("#### Average Traffic by Hour of Day")
+    df_hourly = pd.DataFrame({"hour": [a["Hour"] for a in actions_log],
+                               "requests": actual_reqs})
+    hourly_avg = df_hourly.groupby("hour")["requests"].mean()
+
+    fig_h, ax_h = plt.subplots(figsize=(10, 3))
+    ax_h.bar(hourly_avg.index, hourly_avg.values, color="#FF9800", edgecolor="white")
+    ax_h.set_xlabel("Hour of Day")
+    ax_h.set_ylabel("Avg Requests")
+    ax_h.set_title("Average Hourly Traffic Pattern")
+    ax_h.set_xticks(range(24))
+    ax_h.set_xticklabels([f"{h:02d}" for h in range(24)])
+    ax_h.grid(True, alpha=0.2, axis="y")
+    fig_h.tight_layout()
+    st.pyplot(fig_h)
 
     st.markdown("---")
     st.markdown("#### Scaling Actions Log")
@@ -216,7 +247,7 @@ with tab_sim:
 #  TAB 2 — Live Control Panel
 # ══════════════════════════════════════════════
 with tab_live:
-    st.subheader("🎛️ Real-Time Scaling Simulator")
+    st.subheader("Real-Time Scaling Simulator")
     st.markdown(
         "Drag the sliders to simulate **any workload scenario** and instantly see "
         "the ML prediction, SLA evaluation, and scaling decision."
@@ -227,13 +258,13 @@ with tab_live:
     lc1, lc2, lc3 = st.columns(3)
 
     with lc1:
-        live_timestamp = st.slider(
-            "Timestamp", min_value=1, max_value=200, value=50,
-            help="Simulated time step"
+        live_hour = st.slider(
+            "Hour of Day", min_value=0, max_value=23, value=14,
+            help="Simulated hour (0=midnight, 12=noon, 18=evening)"
         )
     with lc2:
         live_requests = st.slider(
-            "Current Requests / sec", min_value=0, max_value=800, value=250,
+            "Current Requests / hour", min_value=0, max_value=800, value=250,
             step=10, help="Incoming request rate right now"
         )
     with lc3:
@@ -242,16 +273,33 @@ with tab_live:
             value=65.0, step=1.0, help="Current server CPU utilisation"
         )
 
-    live_containers = st.slider(
-        "Current Running Containers", min_value=1, max_value=15, value=3,
-        help="How many containers are currently active"
-    )
+    lc4, lc5, lc6 = st.columns(3)
+
+    with lc4:
+        live_dow = st.selectbox(
+            "Day of Week",
+            options=[0, 1, 2, 3, 4, 5, 6],
+            format_func=lambda x: ["Sunday","Monday","Tuesday","Wednesday",
+                                    "Thursday","Friday","Saturday"][x],
+            index=2,  # Tuesday default
+            help="Day of the week (affects weekend prediction)"
+        )
+    with lc5:
+        live_is_weekend = 1 if live_dow in (0, 6) else 0
+        st.metric("Weekend?", "Yes" if live_is_weekend else "No")
+    with lc6:
+        live_containers = st.slider(
+            "Current Running Containers", min_value=1, max_value=15, value=3,
+            help="How many containers are currently active"
+        )
 
     st.markdown("---")
 
     # ── Run prediction & decision ──
     live_metrics = {
-        "timestamp": live_timestamp,
+        "hour": live_hour,
+        "day_of_week": live_dow,
+        "is_weekend": live_is_weekend,
         "requests": live_requests,
         "cpu_usage": live_cpu,
     }
@@ -271,7 +319,7 @@ with tab_live:
     result_cols[2].metric("Current Capacity", f"{live_containers * sla_max_reqs} reqs",
                           help=f"{live_containers} containers x {sla_max_reqs} reqs each")
 
-    action_emoji = {"scale_up": "🔴 SCALE UP", "scale_down": "🟢 SCALE DOWN", "no_change": "⚪ NO CHANGE"}
+    action_emoji = {"scale_up": "SCALE UP", "scale_down": "SCALE DOWN", "no_change": "NO CHANGE"}
     result_cols[3].metric("Scaling Action", action_emoji.get(live_decision["action"], live_decision["action"]))
 
     # ── Detailed breakdown ──
@@ -280,11 +328,13 @@ with tab_live:
 
     with detail_left:
         st.markdown("#### Decision Breakdown")
+        day_name = ["Sunday","Monday","Tuesday","Wednesday","Thursday","Friday","Saturday"][live_dow]
+        st.markdown(f"- **Time:** {live_hour:02d}:00 on {day_name} {'(Weekend)' if live_is_weekend else '(Weekday)'}")
         st.markdown(f"- **Prediction:** {live_pred} requests expected at next time step")
         st.markdown(f"- **Containers needed:** ceil({live_pred} / {sla_max_reqs}) = "
                     f"**{math.ceil(live_pred / sla_max_reqs)}**")
         if live_cpu > sla_max_cpu:
-            st.warning(f"CPU {live_cpu}% exceeds SLA threshold of {sla_max_cpu}% — adding safety buffer!")
+            st.warning(f"CPU {live_cpu}% exceeds SLA threshold of {sla_max_cpu}% -- adding safety buffer!")
         else:
             st.success(f"CPU {live_cpu}% is within SLA threshold of {sla_max_cpu}%")
         st.info(f"**Reason:** {live_decision['reason']}")
@@ -316,7 +366,7 @@ with tab_live:
 #  TAB 3 — What-If Scenarios
 # ══════════════════════════════════════════════
 with tab_whatif:
-    st.subheader("🧪 What-If Scenario Comparison")
+    st.subheader("What-If Scenario Comparison")
     st.markdown(
         "Compare how the system responds to **different traffic scenarios** side by side. "
         "Adjust each scenario's parameters independently."
@@ -326,47 +376,54 @@ with tab_whatif:
     scenario_cols = st.columns(3)
     scenarios = []
 
-    labels = ["Scenario A (Low Traffic)", "Scenario B (Medium Traffic)", "Scenario C (Peak Traffic)"]
-    defaults_reqs = [80, 250, 450]
-    defaults_cpu = [25.0, 60.0, 92.0]
+    labels = ["Scenario A (Night - Low)", "Scenario B (Afternoon - Med)", "Scenario C (Peak Hour)"]
+    defaults_reqs = [60, 250, 450]
+    defaults_cpu = [15.0, 60.0, 92.0]
+    defaults_hour = [3, 14, 11]
+    defaults_dow = [2, 2, 1]  # Tuesday, Tuesday, Monday
 
-    for i, (col, label, def_req, def_cpu) in enumerate(
-        zip(scenario_cols, labels, defaults_reqs, defaults_cpu)
+    for i, (col, label, def_req, def_cpu, def_hr, def_dw) in enumerate(
+        zip(scenario_cols, labels, defaults_reqs, defaults_cpu, defaults_hour, defaults_dow)
     ):
         with col:
             st.markdown(f"**{label}**")
+            s_hour = st.number_input(
+                "Hour (0-23)", min_value=0, max_value=23,
+                value=def_hr, step=1, key=f"scenario_hour_{i}"
+            )
             s_reqs = st.number_input(
-                "Requests/sec", min_value=0, max_value=1000,
+                "Requests/hour", min_value=0, max_value=1000,
                 value=def_req, step=10, key=f"scenario_reqs_{i}"
             )
             s_cpu = st.number_input(
                 "CPU Usage (%)", min_value=0.0, max_value=100.0,
                 value=def_cpu, step=5.0, key=f"scenario_cpu_{i}"
             )
+            s_dow = st.selectbox(
+                "Day", options=[0,1,2,3,4,5,6],
+                format_func=lambda x: ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][x],
+                index=def_dw, key=f"scenario_dow_{i}"
+            )
             s_containers = st.number_input(
                 "Current Containers", min_value=1, max_value=15,
                 value=3, step=1, key=f"scenario_cont_{i}"
             )
             scenarios.append({
-                "label": label,
-                "requests": s_reqs,
-                "cpu": s_cpu,
+                "label": label, "hour": s_hour,
+                "requests": s_reqs, "cpu": s_cpu,
+                "dow": s_dow, "is_weekend": 1 if s_dow in (0,6) else 0,
                 "containers": s_containers,
             })
 
     st.markdown("---")
     st.markdown("#### Comparison Results")
 
-    result_header = st.columns(4)
-    result_header[0].markdown("**Metric**")
-    for i, s in enumerate(scenarios):
-        short_label = ["A", "B", "C"][i]
-        result_header[i + 1].markdown(f"**Scenario {short_label}**")
-
     # Compute predictions for each scenario
     scenario_results = []
     for s in scenarios:
-        metrics = {"timestamp": 50, "requests": s["requests"], "cpu_usage": s["cpu"]}
+        metrics = {"hour": s["hour"], "day_of_week": s["dow"],
+                   "is_weekend": s["is_weekend"],
+                   "requests": s["requests"], "cpu_usage": s["cpu"]}
         pred = predict_load(metrics, model)
         dec = decide_scaling(pred, s["cpu"], s["containers"],
                              max_cpu=sla_max_cpu, max_reqs=sla_max_reqs)
@@ -379,6 +436,11 @@ with tab_whatif:
         ("Action", [r["decision"]["action"].replace("_", " ").upper() for r in scenario_results]),
         ("New Capacity", [f"{r['decision']['required_containers'] * sla_max_reqs} reqs" for r in scenario_results]),
     ]
+
+    row_header = st.columns(4)
+    row_header[0].markdown("**Metric**")
+    for i in range(3):
+        row_header[i+1].markdown(f"**{'ABC'[i]}**")
 
     for row_label, values in rows:
         row_cols = st.columns(4)
@@ -402,7 +464,7 @@ with tab_whatif:
     ax_comp.set_xticks(x)
     ax_comp.set_xticklabels(["Scenario A", "Scenario B", "Scenario C"])
     ax_comp.set_ylabel("Requests")
-    ax_comp.set_title("Capacity vs Demand — Scenario Comparison")
+    ax_comp.set_title("Capacity vs Demand -- Scenario Comparison")
     ax_comp.legend()
     ax_comp.grid(True, alpha=0.2, axis="y")
     fig_comp.tight_layout()
@@ -413,20 +475,18 @@ with tab_whatif:
 #  TAB 4 — Step-by-Step Simulation
 # ══════════════════════════════════════════════
 with tab_step:
-    st.subheader("⏩ Step-by-Step Simulation")
+    st.subheader("Step-by-Step Simulation")
     st.markdown(
         "Walk through the dataset **one record at a time**. Use the slider to pick "
         "any time step and see what the system decides at that exact moment."
     )
     st.markdown("---")
 
-    # Load dataset for step-by-step access
     monitor_step = WorkloadMonitor()
     total_records = monitor_step.total_records()
 
     step_idx = st.slider("Select Time Step", min_value=1, max_value=total_records, value=1)
 
-    # Reset and walk to the selected index
     monitor_step.reset()
     rm_step = ResourceManager(initial_containers=sla_initial_containers)
 
@@ -448,10 +508,11 @@ with tab_step:
     d = current_step["decision"]
 
     # ── Current step display ──
-    st.markdown(f"### Time Step {step_idx} of {total_records}")
+    day_name = ["Sun","Mon","Tue","Wed","Thu","Fri","Sat"][m["day_of_week"]]
+    st.markdown(f"### Step {step_idx} of {total_records} — {m['datetime']} ({day_name})")
 
     sc1, sc2, sc3, sc4 = st.columns(4)
-    sc1.metric("Requests", f"{m['requests']} /sec")
+    sc1.metric("Requests", f"{m['requests']} /hour")
     sc2.metric("CPU Usage", f"{m['cpu_usage']}%",
                delta="OVER SLA" if m["cpu_usage"] > sla_max_cpu else "OK",
                delta_color="inverse" if m["cpu_usage"] > sla_max_cpu else "normal")
@@ -461,8 +522,7 @@ with tab_step:
     st.markdown("---")
 
     sc5, sc6, sc7 = st.columns(3)
-    action_display = {"scale_up": "🔴 SCALE UP", "scale_down": "🟢 SCALE DOWN", "no_change": "⚪ NO CHANGE"}
-    sc5.metric("Scaling Action", action_display.get(d["action"], d["action"]))
+    sc5.metric("Scaling Action", d["action"].replace("_"," ").upper())
     sc6.metric("Containers After", f"{d['required_containers']}")
     sc7.metric("New Capacity", f"{d['required_containers'] * sla_max_reqs} reqs")
 
@@ -472,30 +532,29 @@ with tab_step:
     if len(step_history) > 1:
         st.markdown("#### History up to this step")
 
-        step_ts = [h["metrics"]["timestamp"] for h in step_history]
+        step_dts = [pd.Timestamp(h["metrics"]["datetime"]) for h in step_history]
         step_actual = [h["metrics"]["requests"] for h in step_history]
         step_preds = [h["pred"] for h in step_history]
         step_conts = [h["containers"] for h in step_history]
 
-        fig_step, (ax_s1, ax_s2) = plt.subplots(1, 2, figsize=(12, 3))
+        fig_step, (ax_s1, ax_s2) = plt.subplots(1, 2, figsize=(14, 3))
 
-        ax_s1.plot(step_ts, step_actual, label="Actual", linewidth=2, color="#2196F3")
-        ax_s1.plot(step_ts, step_preds, label="Predicted", linewidth=2,
+        ax_s1.plot(step_dts, step_actual, label="Actual", linewidth=1.5, color="#2196F3")
+        ax_s1.plot(step_dts, step_preds, label="Predicted", linewidth=1.5,
                    linestyle="--", color="#FF5722")
-        ax_s1.axvline(x=step_idx, color="gray", linestyle=":", alpha=0.5, label="Current step")
-        ax_s1.set_xlabel("Timestamp")
+        ax_s1.set_xlabel("Date & Time")
         ax_s1.set_ylabel("Requests")
         ax_s1.set_title("Workload History")
         ax_s1.legend(fontsize=8)
+        ax_s1.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
         ax_s1.grid(True, alpha=0.3)
 
-        ax_s2.step(step_ts, step_conts, where="mid", linewidth=2, color="#4CAF50")
-        ax_s2.fill_between(step_ts, step_conts, step="mid", alpha=0.2, color="#4CAF50")
-        ax_s2.axvline(x=step_idx, color="gray", linestyle=":", alpha=0.5, label="Current step")
-        ax_s2.set_xlabel("Timestamp")
+        ax_s2.step(step_dts, step_conts, where="mid", linewidth=1.5, color="#4CAF50")
+        ax_s2.fill_between(step_dts, step_conts, step="mid", alpha=0.2, color="#4CAF50")
+        ax_s2.set_xlabel("Date & Time")
         ax_s2.set_ylabel("Containers")
         ax_s2.set_title("Container History")
-        ax_s2.legend(fontsize=8)
+        ax_s2.xaxis.set_major_formatter(mdates.DateFormatter("%b %d"))
         ax_s2.grid(True, alpha=0.3)
 
         fig_step.tight_layout()
@@ -512,13 +571,13 @@ with tab_arch:
     Client Requests
          |
          v
-    Monitoring Module  -->  Metrics Collector
+    Monitoring Module  -->  Metrics Collector (datetime, hour, day, requests, cpu, mem)
          |
          v
-    Data Preprocessing
+    Data Preprocessing  -->  Feature Engineering (hour, day_of_week, is_weekend)
          |
          v
-    ML Prediction Engine  -->  Predicted Workload
+    ML Prediction Engine  -->  Predicted Workload (next hour)
          |
          v
     SLA Evaluation Engine
@@ -542,15 +601,30 @@ with tab_arch:
         "File": ["monitor.py", "utils/preprocessing.py", "predictor.py",
                  "scaler.py", "resource_manager.py", "app.py"],
         "Key Functions": [
-            "get_current_metrics()",
-            "load_dataset(), prepare_features()",
-            "train_model(), predict_load()",
-            "evaluate_sla(), decide_scaling()",
+            "get_current_metrics() -> datetime, hour, dow, requests, cpu, mem",
+            "load_dataset(), prepare_features() -> [hour, dow, is_weekend, reqs, cpu]",
+            "train_model(), predict_load() using 5 time-aware features",
+            "evaluate_sla(), decide_scaling() with configurable thresholds",
             "scale_up(), scale_down(), set_containers()",
-            "Streamlit UI (this dashboard)",
+            "Streamlit UI with 5 interactive tabs",
         ],
     }
     st.table(pd.DataFrame(module_data))
+
+    st.markdown("---")
+    st.markdown("#### ML Features")
+    feature_data = {
+        "Feature": ["hour", "day_of_week", "is_weekend", "requests", "cpu_usage"],
+        "Type": ["Time", "Time", "Time", "Workload", "Workload"],
+        "Description": [
+            "Hour of day (0-23) — captures daily traffic cycle",
+            "Day of week (0=Sun, 6=Sat) — captures weekly patterns",
+            "Binary flag (1=weekend, 0=weekday) — weekend traffic is lower",
+            "Current requests per hour",
+            "Current CPU utilisation %",
+        ],
+    }
+    st.table(pd.DataFrame(feature_data))
 
     st.markdown("---")
     st.markdown("#### Current SLA Configuration")
@@ -559,4 +633,4 @@ with tab_arch:
     st.markdown(f"- **Initial Containers:** {sla_initial_containers}")
 
 st.divider()
-st.caption("AI-Driven Cloud Auto-Scaling Prototype  |  Built with Streamlit & Scikit-learn")
+st.caption("AI-Driven Cloud Auto-Scaling Prototype  |  Built with Streamlit & Scikit-learn  |  15-Day Hourly Dataset")

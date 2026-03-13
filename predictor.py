@@ -4,6 +4,9 @@ ML Prediction Engine
 Trains a Linear Regression model on historical workload data
 and predicts future request load given current metrics.
 The trained model is persisted to disk with joblib.
+
+Features: [hour, day_of_week, is_weekend, requests, cpu_usage]
+Target:   next-step request count
 """
 
 import os
@@ -30,7 +33,7 @@ def train_model(X: np.ndarray, y: np.ndarray, test_size: float = 0.2) -> dict:
 
     Parameters
     ----------
-    X : feature matrix  [timestamp, requests, cpu_usage]
+    X : feature matrix  [hour, day_of_week, is_weekend, requests, cpu_usage]
     y : target vector   [next-step requests]
     test_size : fraction held out for evaluation
 
@@ -83,7 +86,8 @@ def predict_load(current_metrics: dict, model: LinearRegression | None = None) -
 
     Parameters
     ----------
-    current_metrics : dict with keys timestamp, requests, cpu_usage
+    current_metrics : dict with keys hour, day_of_week, is_weekend,
+                      requests, cpu_usage
     model           : sklearn model (loaded from disk if not supplied)
 
     Returns
@@ -94,7 +98,9 @@ def predict_load(current_metrics: dict, model: LinearRegression | None = None) -
         model = load_model()
 
     features = np.array(
-        [[current_metrics["timestamp"],
+        [[current_metrics["hour"],
+          current_metrics["day_of_week"],
+          current_metrics["is_weekend"],
           current_metrics["requests"],
           current_metrics["cpu_usage"]]]
     )
