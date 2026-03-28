@@ -22,6 +22,8 @@ import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import matplotlib
 matplotlib.use("Agg")
+from streamlit_autorefresh import st_autorefresh
+from datetime import datetime
 
 # ── Ensure project root is on sys.path ───────
 PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
@@ -33,6 +35,7 @@ from predictor import train_model, predict_load, load_model, MODEL_PATH
 from scaler import decide_scaling, evaluate_sla
 from resource_manager import ResourceManager
 from utils.preprocessing import get_processed_data
+from live_generator import generate_live_metrics
 
 # ──────────────────────────────────────────────
 #  Page config
@@ -108,11 +111,12 @@ st.divider()
 # ══════════════════════════════════════════════
 #  TABS — Main navigation
 # ══════════════════════════════════════════════
-tab_sim, tab_live, tab_whatif, tab_step, tab_arch = st.tabs([
+tab_sim, tab_live, tab_whatif, tab_step, tab_monitor, tab_arch = st.tabs([
     "Full Simulation",
     "Live Control Panel",
     "What-If Scenarios",
     "Step-by-Step",
+    "Live Monitor",
     "Architecture",
 ])
 
@@ -633,4 +637,178 @@ with tab_arch:
     st.markdown(f"- **Initial Containers:** {sla_initial_containers}")
 
 st.divider()
-st.caption("AI-Driven Cloud Auto-Scaling Prototype  |  Built with Streamlit & Scikit-learn  |  15-Day Hourly Dataset")
+st.caption("AI-Driven Cloud Auto-Scaling Prototype  |  Built with Streamlit & Scikit-learn  |  Live + Historical Modes")
+
+# ══════════════════════════════════════════════
+#  TAB 6 — Live Monitor (auto-refreshing)
+# ══════════════════════════════════════════════
+with tab_monitor:
+    st.subheader("Live Workload Monitor")
+    st.markdown(
+        "This tab generates **real-time workload data** based on the **actual current time** "
+        "on your machine. Every 3 seconds, a new data point is generated, the ML model predicts "
+        "the next hour's load, and a scaling decision is made — all live."
+    )
+
+    # ── Auto-refresh every 3 seconds ──
+    refresh_count = st_autorefresh(interval=3000, limit=None, key="live_monitor_refresh")
+
+    # ── Session state for live history ──
+    if "live_history" not in st.session_state:
+        st.session_state.live_history = []
+    if "live_containers" not in st.session_state:
+        st.session_state.live_containers = sla_initial_containers
+
+    # ── Generate new live data point ──
+    live_metrics = generate_live_metrics()
+    live_pred = predict_load(live_metrics, model)
+    live_decision = decide_scaling(
+        live_pred, live_metrics["cpu_usage"],
+        st.session_state.live_containers,
+        max_cpu=sla_max_cpu, max_reqs=sla_max_reqs,
+    )
+
+    # Update container count
+    st.session_state.live_containers = live_decision["required_containers"]
+
+    # Scaling direction indicator
+    action = live_decision["action"]
+    if action == "scale_up":
+        direction = "▲"
+        action_color = "red"
+        action_label = "SCALE UP ▲"
+    elif action == "scale_down":
+        direction = "▼"
+        action_color = "green"
+        action_label = "SCALE DOWN ▼"
+    else:
+        direction = "−"
+        action_color = "gray"
+        action_label = "NO CHANGE −"
+
+    # Append to history
+    day_names = ["Sun", "Mon", "Tue", "Wed", "Thu", "Fri", "Sat"]
+    st.session_state.live_history.append({
+        "Time": live_metrics["datetime"],
+        "Day": day_names[live_metrics["day_of_week"]],
+        "Requests": live_metrics["requests"],
+        "CPU %": live_metrics["cpu_usage"],
+        "Memory %": live_metrics["memory_usage"],
+        "Predicted": live_pred,
+        "Containers": st.session_state.live_containers,
+        "Action": action_label,
+        "Direction": direction,
+    })
+
+    # Keep last 200 records max
+    if len(st.session_state.live_history) > 200:
+        st.session_state.live_history = st.session_state.live_history[-200:]
+
+    st.markdown("---")
+
+    # ── Current Status Cards ──
+    day_name = day_names[live_metrics["day_of_week"]]
+    weekend_tag = " (Weekend)" if live_metrics["is_weekend"] else ""
+    st.markdown(f"### Now: {live_metrics['datetime']}  —  {day_name}{weekend_tag}")
+
+    m1, m2, m3, m4, m5 = st.columns(5)
+    m1.metric("Requests/hr", f"{live_metrics['requests']}")
+    m2.metric("CPU", f"{live_metrics['cpu_usage']}%",
+             delta="OVER SLA" if live_metrics['cpu_usage'] > sla_max_cpu else "OK",
+             delta_color="inverse" if live_metrics['cpu_usage'] > sla_max_cpu else "normal")
+    m3.metric("Predicted Next", f"{live_pred} reqs")
+    m4.metric("Containers", f"{st.session_state.live_containers} {direction}")
+    m5.metric("Capacity", f"{st.session_state.live_containers * sla_max_reqs} reqs")
+
+    # ── Action banner ──
+    if action == "scale_up":
+        st.error(f"**{action_label}**  —  {live_decision['reason']}")
+    elif action == "scale_down":
+        st.success(f"**{action_label}**  —  {live_decision['reason']}")
+    else:
+        st.info(f"**{action_label}**  —  {live_decision['reason']}")
+
+    st.markdown("---")
+
+    # ── Live Charts ──
+    if len(st.session_state.live_history) >= 2:
+        hist_df = pd.DataFrame(st.session_state.live_history)
+        hist_df["Time_dt"] = pd.to_datetime(hist_df["Time"])
+
+        chart_col1, chart_col2 = st.columns(2)
+
+        with chart_col1:
+            st.markdown("#### Live Workload")
+            fig_lw, ax_lw = plt.subplots(figsize=(7, 3))
+            ax_lw.plot(hist_df["Time_dt"], hist_df["Requests"],
+                       linewidth=1.5, color="#2196F3", label="Actual")
+            ax_lw.plot(hist_df["Time_dt"], hist_df["Predicted"],
+                       linewidth=1.5, linestyle="--", color="#FF5722", label="Predicted")
+            ax_lw.set_xlabel("Time")
+            ax_lw.set_ylabel("Requests")
+            ax_lw.legend(fontsize=8)
+            ax_lw.grid(True, alpha=0.3)
+            ax_lw.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+            plt.xticks(rotation=45)
+            fig_lw.tight_layout()
+            st.pyplot(fig_lw)
+
+        with chart_col2:
+            st.markdown("#### Containers")
+            fig_lc, ax_lc = plt.subplots(figsize=(7, 3))
+            ax_lc.step(hist_df["Time_dt"], hist_df["Containers"],
+                       where="mid", linewidth=2, color="#4CAF50")
+            ax_lc.fill_between(hist_df["Time_dt"], hist_df["Containers"],
+                               step="mid", alpha=0.2, color="#4CAF50")
+
+            # Add direction markers
+            for idx, row in hist_df.iterrows():
+                if row["Direction"] == "▲":
+                    ax_lc.annotate("▲", (row["Time_dt"], row["Containers"]),
+                                  fontsize=10, color="red", ha="center", va="bottom")
+                elif row["Direction"] == "▼":
+                    ax_lc.annotate("▼", (row["Time_dt"], row["Containers"]),
+                                  fontsize=10, color="green", ha="center", va="top")
+
+            ax_lc.set_xlabel("Time")
+            ax_lc.set_ylabel("Containers")
+            ax_lc.grid(True, alpha=0.3)
+            ax_lc.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+            plt.xticks(rotation=45)
+            fig_lc.tight_layout()
+            st.pyplot(fig_lc)
+
+        # CPU chart
+        st.markdown("#### CPU Usage")
+        fig_cpu, ax_cpu = plt.subplots(figsize=(14, 2.5))
+        ax_cpu.plot(hist_df["Time_dt"], hist_df["CPU %"],
+                    linewidth=1.5, color="#9C27B0")
+        ax_cpu.axhline(y=sla_max_cpu, color="red", linestyle="--",
+                       linewidth=1, label=f"SLA Threshold ({sla_max_cpu}%)")
+        ax_cpu.set_xlabel("Time")
+        ax_cpu.set_ylabel("CPU %")
+        ax_cpu.legend(fontsize=8)
+        ax_cpu.grid(True, alpha=0.3)
+        ax_cpu.xaxis.set_major_formatter(mdates.DateFormatter("%H:%M:%S"))
+        plt.xticks(rotation=45)
+        fig_cpu.tight_layout()
+        st.pyplot(fig_cpu)
+
+    st.markdown("---")
+
+    # ── Live Data Table ──
+    st.markdown("#### Live Data Feed")
+    st.caption(f"{len(st.session_state.live_history)} records collected  |  Auto-refreshes every 3 seconds")
+
+    if st.session_state.live_history:
+        display_df = pd.DataFrame(st.session_state.live_history[::-1])  # newest first
+        display_df = display_df[["Time", "Day", "Requests", "CPU %", "Memory %",
+                                  "Predicted", "Containers", "Action"]]
+        st.dataframe(display_df, use_container_width=True, hide_index=True,
+                     height=400)
+
+    # ── Clear history button ──
+    if st.button("Clear Live History", key="clear_live"):
+        st.session_state.live_history = []
+        st.session_state.live_containers = sla_initial_containers
+        st.rerun()
